@@ -1,0 +1,25 @@
+{
+  "name": "corellium-gateway",
+  "version": "1.0.0",
+  "description": "Corellium gateway used by corellium-action",
+  "main": "index.js",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frida/corellium-gateway.git"
+  },
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/frida/corellium-gateway/issues"
+  },
+  "homepage": "https://github.com/frida/corellium-gateway#readme",
+  "dependencies": {
+    "@corellium/corellium-api": "^1.4.0",
+    "@octokit/core": "^3.5.1",
+    "async-await-queue": "^1.2.0",
+    "config": "^3.3.7",
+    "fastify": "^3.27.4",
+    "fastify-multipart": "^5.3.1",
+    "http-errors": "^2.0.0"
+  }
+}
