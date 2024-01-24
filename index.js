@@ -4,6 +4,7 @@ import { Corellium } from '@corellium/corellium-api';
 import Fastify from 'fastify';
 import FastifyMultipart from '@fastify/multipart';
 import HttpErrors from 'http-errors';
+import { createTokenAuth } from "@octokit/auth-token";
 import { Octokit } from '@octokit/core';
 import stream from 'stream';
 
@@ -219,16 +220,38 @@ fastify.route({
 });
 
 async function authenticate(token) {
-  let repos;
+  let octokit, authentication;
   try {
-    const octokit = new Octokit({ auth: token });
-    repos = await octokit.request('GET /installation/repositories');
+    octokit = new Octokit({ auth: token });
+
+    const auth = createTokenAuth(token);
+    authentication = await auth();
   } catch (e) {
     throw new Unauthorized('invalid token');
   }
 
-  if (!repos.data.repositories.some(repo => AUTHORIZED_OWNERS.has(repo.owner.login))) {
-    throw new Forbidden('not among authorized owners');
+  if (authentication.tokenType === 'installation') {
+    let repos;
+    try {
+      repos = await octokit.request('GET /installation/repositories');
+    } catch (e) {
+      throw new Unauthorized('invalid token');
+    }
+
+    if (!repos.data.repositories.some(repo => AUTHORIZED_OWNERS.has(repo.owner.login))) {
+      throw new Forbidden('not among authorized owners');
+    }
+  } else {
+    let orgs;
+    try {
+      orgs = await octokit.request('GET /user/orgs');
+    } catch (e) {
+      throw new Unauthorized('invalid token');
+    }
+
+    if (!orgs.data.some(org => AUTHORIZED_OWNERS.has(org.login))) {
+      throw new Forbidden('not among authorized owners');
+    }
   }
 }
 
