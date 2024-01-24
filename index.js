@@ -3,8 +3,9 @@ import config from 'config';
 import { Corellium } from '@corellium/corellium-api';
 import Fastify from 'fastify';
 import FastifyMultipart from '@fastify/multipart';
+import fs from 'fs';
 import HttpErrors from 'http-errors';
-import { createTokenAuth } from "@octokit/auth-token";
+import { createTokenAuth } from '@octokit/auth-token';
 import { Octokit } from '@octokit/core';
 import stream from 'stream';
 
@@ -51,173 +52,185 @@ fastify.route({
   method: 'POST',
   url: '/devices/:device',
   handler: async (request, reply) => {
-    try {
-      let project = null;
-      await globalSerialQueue.run(async () => {
-        if (corellium === null) {
-          const { endpoint, username, password } = config.get('Corellium');
-          const c = new Corellium({ endpoint, username, password });
-          await c.login();
-          corellium = c;
-        }
+    const deviceId = request.params.device;
 
-        const projectName = config.get('Corellium.project');
-        const p = await corellium.projectNamed(projectName);
-        if (p === undefined)
-          throw new ServiceUnavailable(`project '${projectName}' not found`);
-        project = p;
-      });
+    const files = await request.saveRequestFiles();
+    const asset = files.find(f => f.fieldname === 'asset');
+    if (asset === undefined)
+      throw new BadRequest('missing asset file');
 
-      const deviceId = request.params.device;
-      let deviceQueue = deviceQueues.get(deviceId);
-      if (deviceQueue === undefined) {
-        deviceQueue = new Queue();
-        deviceQueues.set(deviceId, deviceQueue);
+    const { fields } = asset;
+    const script = fields.script?.value?.replace(/\r/g, '') ?? null;
+    const marker = fields.marker?.value ?? null;
+    const token = fields.token?.value ?? null;
+    if (script === null)
+      throw new BadRequest('missing script field');
+    if (marker === null)
+      throw new BadRequest('missing marker field');
+    if (token === null)
+      throw new BadRequest('missing token field');
+
+    await authenticate(token);
+
+    const output = new stream.Readable();
+    output._read = () => {};
+
+    reply.header('Content-Type', 'text/plain; charset=utf-8');
+    uploadAndRun({ deviceId, token, asset, script, marker, output });
+
+    return reply.send(output);
+  },
+});
+
+async function uploadAndRun({ deviceId, asset, script, marker, output }) {
+  let state = 'open';
+
+  emit('[*] Preparing\n');
+
+  try {
+    let project = null;
+    await globalSerialQueue.run(async () => {
+      if (corellium === null) {
+        const { endpoint, username, password } = config.get('Corellium');
+        const c = new Corellium({ endpoint, username, password });
+        emit('[*] Logging in\n');
+        await c.login();
+        corellium = c;
       }
 
-      return await deviceQueue.run(async () => {
-        const instance = (await project.instances()).find(candidate => candidate.name == deviceId);
-        if (instance === undefined) {
-          deviceQueues.delete(deviceId);
-          throw new NotFound(`device '${deviceId}' not found`);
+      const projectName = config.get('Corellium.project');
+      emit('[*] Resolving project\n');
+      const p = await corellium.projectNamed(projectName);
+      if (p === undefined)
+        throw new ServiceUnavailable(`project '${projectName}' not found`);
+      project = p;
+    });
+
+    let deviceQueue = deviceQueues.get(deviceId);
+    if (deviceQueue === undefined) {
+      deviceQueue = new Queue();
+      deviceQueues.set(deviceId, deviceQueue);
+    }
+
+    emit('[*] Waiting for device to become available\n');
+
+    return await deviceQueue.run(async () => {
+      emit('[*] Locating instance\n');
+      const instance = (await project.instances()).find(candidate => candidate.name == deviceId);
+      if (instance === undefined) {
+        deviceQueues.delete(deviceId);
+        throw new NotFound(`device '${deviceId}' not found`);
+      }
+
+      if (instance.state !== 'on') {
+        emit('[*] Starting instance\n');
+        await instance.start();
+        emit('[*] Waiting for it to boot\n');
+        await instance.waitForState('on');
+      }
+
+      emit('[*] Connecting to agent\n');
+      const agent = await instance.agent();
+      await agent.ready();
+
+      let assetPath = null;
+      let logPath = null;
+      let logOffset = 0;
+
+      try {
+        emit('[*] Creating remote temporary file\n');
+        assetPath = await agent.tempFile();
+        emit('[*] Starting upload\n');
+        await agent.upload(assetPath, fs.createReadStream(asset.filepath), total => {
+          emit(`[*] Uploaded ${total} / ${asset.file.bytesRead} bytes\n`);
+        });
+
+        const wrapperScriptLines = [
+          'SCRIPT_LOG=$(mktemp)',
+          'cat << EOF | setsid sh > /dev/null 2>&1 &',
+            `export ASSET_PATH=${assetPath}`,
+            '(',
+              'set -ex',
+              script.replace(/\$/g, '\\$'),
+            ') > $SCRIPT_LOG 2>&1',
+            `echo "${marker}\\$?" >> $SCRIPT_LOG`,
+          'EOF',
+          'echo $!',
+          'echo $SCRIPT_LOG',
+        ];
+        if (instance.type === 'android') {
+          wrapperScriptLines.splice(0, 0, 'export TMPDIR=/data/local/tmp');
         }
 
-        if (instance.state !== 'on') {
-          await instance.start();
-          await instance.waitForState('on');
-        }
+        emit(`[*] Running script\n\n`);
+        const spawnResult = await agent.shellExec(wrapperScriptLines.join('\n') + '\n');
+        const lines = spawnResult.output.split('\n');
+        const pid = parseInt(lines[0]);
+        logPath = lines[1];
 
-        const agent = await instance.agent();
-        await agent.ready();
-
-        let token = null;
-        let assetPath = null;
-        let script = null;
-        let marker = null;
-
-        let logPath = null;
-        let output = null;
-        let logOffset = 0;
+        let timer = null;
+        let innerPid = null;
+        const timeout = new Promise((resolve, reject) => {
+          timer = setTimeout(async () => reject(new Error('Timed out')), RUN_TIMEOUT);
+        });
+        timeout.catch(e => {
+          agent.shellExec(`kill -KILL -$(ps -A -o pid= -o pgid= | awk '{ if ($1 == ${pid}) print $2; }')`)
+            .catch(() => {});
+        });
 
         try {
-          const parts = request.parts();
-          for await (const { fieldname, file, value } of parts) {
-            switch (fieldname) {
-              case 'token':
-                token = value;
-                break;
-              case 'asset':
-                if (file === undefined)
-                  throw new BadRequest('asset must be a file');
-                assetPath = await agent.tempFile();
-                await agent.upload(assetPath, file);
-                break;
-              case 'script':
-                if (value === undefined)
-                  throw new BadRequest('script must be a field');
-                script = value.replace(/\r/g, '');
-                break;
-              case 'marker':
-                marker = value;
-                break;
-            }
-          }
-          if (token === null)
-            throw new BadRequest('missing token field');
-          if (assetPath === null)
-            throw new BadRequest('missing asset file');
-          if (script === null)
-            throw new BadRequest('missing script field');
-          if (marker === null)
-            throw new BadRequest('missing marker field');
-
-          await authenticate(token);
-
-          const wrapperScriptLines = [
-            'SCRIPT_LOG=$(mktemp)',
-            'cat << EOF | setsid sh > /dev/null 2>&1 &',
-              `export ASSET_PATH=${assetPath}`,
-              '(',
-                'set -ex',
-                script.replace(/\$/g, '\\$'),
-              ') > $SCRIPT_LOG 2>&1',
-              `echo "${marker}\\$?" >> $SCRIPT_LOG`,
-            'EOF',
-            'echo $!',
-            'echo $SCRIPT_LOG',
-          ];
-          if (instance.type === 'android') {
-            wrapperScriptLines.splice(0, 0, 'export TMPDIR=/data/local/tmp');
-          }
-
-          const spawnResult = await agent.shellExec(wrapperScriptLines.join('\n') + '\n');
-          const lines = spawnResult.output.split('\n');
-          const pid = parseInt(lines[0]);
-          logPath = lines[1];
-
-          output = new stream.Readable();
-          output._read = () => {};
-          reply.send(output);
-
-          try {
-            let timer = null;
-            let innerPid = null;
-            const timeout = new Promise((resolve, reject) => {
-              timer = setTimeout(async () => reject(new Error('Timed out')), RUN_TIMEOUT);
-            });
-            timeout.catch(e => {
-              agent.shellExec(`kill -KILL -$(ps -A -o pid= -o pgid= | awk '{ if ($1 == ${pid}) print $2; }')`)
-                .catch(() => {});
-            });
-
-            try {
-              while (await Promise.race([poll(pid), timeout]) === 'alive') {
-              }
-            } finally {
-              clearTimeout(timer);
-            }
-
-            await consumeLog();
-          } catch (e) {
+          while (await Promise.race([poll(pid), timeout]) === 'alive') {
           }
         } finally {
-          output?.push(null);
-
-          const tempFiles = [assetPath, logPath].filter(p => p !== null);
-          if (tempFiles.length > 0) {
-            agent.shellExec('rm ' + tempFiles.join(' ')).catch(() => {});
-          }
+          clearTimeout(timer);
         }
 
-        async function poll(pid) {
-          await sleep(1000);
-
-          const pollResult = await agent.shellExec(`kill -0 ${pid}`);
-          if (pollResult['exit-status'] !== 0)
-            return 'dead';
-
-          await consumeLog();
-
-          return 'alive';
+        await consumeLog();
+      } finally {
+        const tempFiles = [assetPath, logPath].filter(p => p !== null);
+        if (tempFiles.length > 0) {
+          agent.shellExec('rm ' + tempFiles.join(' ')).catch(() => {});
         }
+      }
 
-        async function consumeLog() {
-          const data = await consumeStream(await agent.download(logPath));
+      async function poll(pid) {
+        await sleep(1000);
 
-          const endOffset = data.length;
-          if (endOffset === logOffset)
-            return;
-          const slice = data.subarray(logOffset, endOffset);
-          logOffset = endOffset;
+        const pollResult = await agent.shellExec(`kill -0 ${pid}`);
+        if (pollResult['exit-status'] !== 0)
+          return 'dead';
 
-          output.push(slice);
-        }
-      });
-    } catch (e) {
-      reply.code(500).send(e);
-    }
+        await consumeLog();
+
+        return 'alive';
+      }
+
+      async function consumeLog() {
+        const data = await consumeStream(await agent.download(logPath));
+
+        const endOffset = data.length;
+        if (endOffset === logOffset)
+          return;
+        const slice = data.subarray(logOffset, endOffset);
+        logOffset = endOffset;
+
+        emit(slice);
+      }
+    });
+  } catch (e) {
+    emit(`[!] ${e.stack}\n`);
+  } finally {
+    emit(null);
   }
-});
+
+  function emit(value) {
+    if (state !== 'open')
+      return;
+    output.push(value);
+    if (value === null)
+      state = 'closed';
+  }
+}
 
 async function authenticate(token) {
   let octokit, authentication;
