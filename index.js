@@ -1,8 +1,8 @@
-import Queue from 'async-await-queue';
+import { Queue } from 'async-await-queue';
 import config from 'config';
 import { Corellium } from '@corellium/corellium-api';
 import Fastify from 'fastify';
-import FastifyMultipart from 'fastify-multipart';
+import FastifyMultipart from '@fastify/multipart';
 import HttpErrors from 'http-errors';
 import { Octokit } from '@octokit/core';
 import stream from 'stream';
@@ -39,7 +39,7 @@ fastify.register(FastifyMultipart, {
 
 async function start() {
   try {
-    await fastify.listen(3000, '::1');
+    await fastify.listen({ host: '::1', port: 3000 });
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);

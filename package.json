@@ -14,12 +14,13 @@
   },
   "homepage": "https://github.com/frida/corellium-gateway#readme",
   "dependencies": {
-    "@corellium/corellium-api": "^1.4.0",
-    "@octokit/core": "^3.5.1",
-    "async-await-queue": "^1.2.0",
-    "config": "^3.3.7",
-    "fastify": "^3.27.4",
-    "fastify-multipart": "^5.3.1",
+    "@corellium/corellium-api": "^1.7.4",
+    "@fastify/multipart": "^8.1.0",
+    "@octokit/auth-token": "^4.0.0",
+    "@octokit/core": "^5.1.0",
+    "async-await-queue": "^2.1.4",
+    "config": "^3.3.10",
+    "fastify": "^4.25.2",
     "http-errors": "^2.0.0"
   }
 }
