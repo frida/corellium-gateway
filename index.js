@@ -35,7 +35,7 @@ fastify.register(FastifyMultipart, {
     fieldNameSize: 16,
     fieldSize: 1024,
     files: 1,
-    fileSize: 32 * 1024 * 1024
+    fileSize: 128 * 1024 * 1024
   }
 });
 
