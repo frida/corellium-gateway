@@ -194,7 +194,7 @@ async function uploadAndRun({ deviceId, asset, script, marker, output }) {
       }
 
       async function poll(pid) {
-        await sleep(1000);
+        await sleep(3000);
 
         const pollResult = await agent.shellExec(`kill -0 ${pid}`);
         if (pollResult['exit-status'] !== 0)
