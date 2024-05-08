@@ -189,16 +189,8 @@ async function uploadAndRun({ deviceId, asset, script, marker, output }) {
       } finally {
         const tempFiles = [assetPath, logPath].filter(p => p !== null);
         if (tempFiles.length > 0) {
-          try {
-            await agent.shellExec('rm ' + tempFiles.join(' '));
-          } catch (e) {
-          }
+          agent.shellExec('rm ' + tempFiles.join(' ')).catch(() => {});
         }
-
-        // There appears to be some kind of resource leak that results in corelliumd eventually getting stuck.
-        // We will kill it after each request for now.
-        agent.shellExec('killall -9 corelliumd').catch(e => {});
-        await sleep(5000);
       }
 
       async function poll(pid) {
