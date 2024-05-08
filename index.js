@@ -85,9 +85,22 @@ fastify.route({
 async function uploadAndRun({ deviceId, asset, script, marker, output }) {
   let state = 'open';
 
-  emit('[*] Preparing\n');
-
   try {
+    await doUploadAndRun();
+  } catch (e) {
+    if (e.message === 'disconnected with code 1002') {
+      emit('[*] Oops, that annoying 1002 issue again. Retrying.\n');
+      await doUploadAndRun();
+    } else {
+      emit(`[!] ${e.stack}\n`);
+    }
+  } finally {
+    emit(null);
+  }
+
+  async function doUploadAndRun() {
+    emit('[*] Preparing\n');
+
     let project = null;
     await globalSerialQueue.run(async () => {
       if (corellium === null) {
@@ -217,10 +230,6 @@ async function uploadAndRun({ deviceId, asset, script, marker, output }) {
         emit(slice);
       }
     });
-  } catch (e) {
-    emit(`[!] ${e.stack}\n`);
-  } finally {
-    emit(null);
   }
 
   function emit(value) {
